@@ -25,7 +25,7 @@ use rocket::{
 use cached::proc_macro::cached;
 use serde::{Deserialize, Serialize};
 use ssi::did::DIDURL;
-use std::{collections::HashMap, convert::TryFrom, path::PathBuf};
+use std::{collections::HashMap, convert::TryFrom, path::PathBuf, sync::Arc};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct OrbitMetadata {
@@ -118,7 +118,8 @@ impl AuthMethods {
     }
 }
 
-#[derive(Clone)]
+pub type ArcOrbit = Arc<Orbit>;
+
 pub struct Orbit {
     pub service: Service,
     metadata: OrbitMetadata,
@@ -132,7 +133,7 @@ pub async fn create_orbit(
     controllers: Vec<DIDURL>,
     auth: &[u8],
     auth_type: AuthTypes,
-) -> Result<Option<Orbit>> {
+) -> Result<Option<ArcOrbit>> {
     let dir = path.join(oid.to_string_of_base(Base::Base58Btc)?);
 
     // fails if DIR exists, this is Create, not Open
@@ -160,7 +161,7 @@ pub async fn create_orbit(
     })??))
 }
 
-pub async fn load_orbit(oid: Cid, path: PathBuf) -> Result<Option<Orbit>> {
+pub async fn load_orbit(oid: Cid, path: PathBuf) -> Result<Option<ArcOrbit>> {
     let dir = path.join(oid.to_string_of_base(Base::Base58Btc)?);
     if !dir.exists() {
         return Ok(None);
@@ -172,7 +173,7 @@ pub async fn load_orbit(oid: Cid, path: PathBuf) -> Result<Option<Orbit>> {
 // 100 orbits => 600 FDs
 // 1min timeout to evict orbits that might have been deleted
 #[cached(size = 100, time = 60, result = true)]
-async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<Orbit> {
+async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<ArcOrbit> {
     let cfg = Config::new(&dir.join("block_store"), generate_keypair());
 
     let md: OrbitMetadata = serde_json::from_slice(&fs::read(dir.join("metadata")).await?)?;
@@ -200,14 +201,14 @@ async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<Orbit> {
     let service_store = Store::new(id, ipfs, db)?;
     let service = Service::start(service_store)?;
 
-    Ok(Orbit {
+    Ok(Arc::new(Orbit {
         service,
         policy: match &md.auth {
             AuthTypes::Tezos => AuthMethods::Tezos(TezosBasicAuthorization { controllers }),
             AuthTypes::ZCAP => AuthMethods::ZCAP(controllers),
         },
         metadata: md,
-    })
+    }))
 }
 
 pub fn get_params<'a>(matrix_params: &'a str) -> HashMap<&'a str, &'a str> {

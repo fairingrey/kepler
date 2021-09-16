@@ -16,10 +16,10 @@ use crate::auth::{
 use crate::cas::{CidWrap, ContentAddressedStorage};
 use crate::codec::{PutContent, SupportedCodecs};
 use crate::config;
-use crate::orbit::{create_orbit, load_orbit, verify_oid, AuthTypes, Orbit};
+use crate::orbit::{create_orbit, load_orbit, verify_oid, ArcOrbit, AuthTypes};
 
 // TODO need to check for every relevant endpoint that the orbit ID in the URL matches the one in the auth token
-async fn uri_listing(orbit: Orbit) -> Result<Json<Vec<String>>, (Status, String)> {
+async fn uri_listing(orbit: ArcOrbit) -> Result<Json<Vec<String>>, (Status, String)> {
     orbit
         .list()
         .await

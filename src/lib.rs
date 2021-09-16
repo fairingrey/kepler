@@ -17,6 +17,7 @@ pub mod ipfs;
 pub mod orbit;
 pub mod routes;
 pub mod s3;
+pub mod s3_routes;
 pub mod tz;
 pub mod zcap;
 
@@ -42,7 +43,9 @@ pub async fn app(config: &Figment) -> Result<Rocket<Build>> {
         delete_content,
         open_orbit_allowlist,
         open_orbit_authz,
-        cors
+        cors,
+        s3_routes::get,
+        s3_routes::put
     ];
 
     if kepler_config.orbits.public {
