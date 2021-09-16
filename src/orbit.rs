@@ -17,6 +17,7 @@ use libipld::{
     store::DefaultParams,
 };
 use rocket::{
+    futures::StreamExt,
     http::Status,
     request::{FromRequest, Outcome, Request},
     tokio::fs,
@@ -121,9 +122,16 @@ impl AuthMethods {
 pub type ArcOrbit = Arc<Orbit>;
 
 pub struct Orbit {
+    task: tokio::task::JoinHandle<()>,
     pub service: Service,
     metadata: OrbitMetadata,
     policy: AuthMethods,
+}
+
+impl Drop for Orbit {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 // Using Option to distinguish when the orbit already exists from a hard error
@@ -177,8 +185,10 @@ async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<ArcOrbit> {
     let cfg = Config::new(&dir.join("block_store"), generate_keypair());
 
     let md: OrbitMetadata = serde_json::from_slice(&fs::read(dir.join("metadata")).await?)?;
+    let md2 = md.clone();
 
     let ipfs = Ipfs::<DefaultParams>::new(cfg).await?;
+    let task_ipfs = ipfs.clone();
     let controllers = md.controllers.clone();
 
     // if let Some(addrs) = md.hosts.get(&PID(ipfs.local_peer_id())) {
@@ -194,6 +204,19 @@ async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<ArcOrbit> {
     //         }
     //     }
     // }
+    let task = tokio::spawn(async move {
+        let mut events = task_ipfs.swarm_events();
+        loop {
+            match events.next().await {
+                Some(ipfs_embed::Event::Discovered(p)) => {
+                    tracing::debug!("dialing peer {}", p);
+                    task_ipfs.dial(&p);
+                }
+                None => return,
+                _ => continue,
+            }
+        }
+    });
 
     let id = oid.to_string_of_base(Base::Base58Btc)?;
     let db = sled::open(dir.join(&id).with_extension("ks3db"))?;
@@ -203,6 +226,7 @@ async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<ArcOrbit> {
 
     Ok(Arc::new(Orbit {
         service,
+        task,
         policy: match &md.auth {
             AuthTypes::Tezos => AuthMethods::Tezos(TezosBasicAuthorization { controllers }),
             AuthTypes::ZCAP => AuthMethods::ZCAP(controllers),
