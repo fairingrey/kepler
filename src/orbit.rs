@@ -2,6 +2,7 @@ use crate::{
     auth::{cid_serde, Action, AuthorizationPolicy, AuthorizationToken},
     cas::ContentAddressedStorage,
     codec::SupportedCodecs,
+    s3::{Service, Store},
     tz::{TezosAuthorizationString, TezosBasicAuthorization},
     zcap::{ZCAPAuthorization, ZCAPTokens},
 };
@@ -119,7 +120,7 @@ impl AuthMethods {
 
 #[derive(Clone)]
 pub struct Orbit {
-    ipfs: Ipfs<DefaultParams>,
+    pub service: Service,
     metadata: OrbitMetadata,
     policy: AuthMethods,
 }
@@ -179,8 +180,28 @@ async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<Orbit> {
     let ipfs = Ipfs::<DefaultParams>::new(cfg).await?;
     let controllers = md.controllers.clone();
 
+    // if let Some(addrs) = md.hosts.get(&PID(ipfs.local_peer_id())) {
+    //     for addr in addrs {
+    //         ipfs.listen_on(addr.clone())?.next().await;
+    //     }
+    // }
+
+    // for (id, addrs) in md.hosts.iter() {
+    //     if id.0 != ipfs.local_peer_id() {
+    //         for addr in addrs {
+    //             ipfs.add_address(&id.0, addr.clone())
+    //         }
+    //     }
+    // }
+
+    let id = oid.to_string_of_base(Base::Base58Btc)?;
+    let db = sled::open(dir.join(&id).with_extension("ks3db"))?;
+
+    let service_store = Store::new(id, ipfs, db)?;
+    let service = Service::start(service_store)?;
+
     Ok(Orbit {
-        ipfs,
+        service,
         policy: match &md.auth {
             AuthTypes::Tezos => AuthMethods::Tezos(TezosBasicAuthorization { controllers }),
             AuthTypes::ZCAP => AuthMethods::ZCAP(controllers),
@@ -229,29 +250,25 @@ impl ContentAddressedStorage for Orbit {
         content: &[u8],
         codec: SupportedCodecs,
     ) -> Result<Cid, <Self as ContentAddressedStorage>::Error> {
-        self.ipfs.put(content, codec).await
+        self.service.ipfs.put(content, codec).await
     }
     async fn get(
         &self,
         address: &Cid,
     ) -> Result<Option<Vec<u8>>, <Self as ContentAddressedStorage>::Error> {
-        ContentAddressedStorage::get(&self.ipfs, address).await
+        ContentAddressedStorage::get(&self.service.ipfs, address).await
     }
     async fn delete(&self, address: &Cid) -> Result<(), <Self as ContentAddressedStorage>::Error> {
-        self.ipfs.delete(address).await
+        self.service.ipfs.delete(address).await
     }
     async fn list(&self) -> Result<Vec<Cid>, <Self as ContentAddressedStorage>::Error> {
-        self.ipfs.list().await
+        self.service.ipfs.list().await
     }
 }
 
 impl Orbit {
     pub fn id(&self) -> &Cid {
         &self.metadata.id
-    }
-
-    pub fn hosts(&self) -> Vec<PeerId> {
-        vec![self.ipfs.local_peer_id()]
     }
 
     pub fn admins(&self) -> &[DIDURL] {
