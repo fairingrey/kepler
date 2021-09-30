@@ -3,6 +3,7 @@ use crate::config;
 use crate::orbit::{create_orbit, load_orbit, verify_oid, ArcOrbit, AuthTokens, AuthTypes};
 use crate::zcap::ZCAPTokens;
 use anyhow::Result;
+use ipfs_embed::{generate_keypair, Keypair, Multiaddr, PeerId};
 use libipld::cid::Cid;
 use rocket::{
     http::Status,
@@ -10,7 +11,7 @@ use rocket::{
 };
 use serde::{Deserialize, Serialize};
 use ssi::did::DIDURL;
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr, sync::RwLock};
 
 pub mod cid_serde {
     use libipld::cid::{multibase::Base, Cid};
@@ -204,7 +205,7 @@ impl<'r> FromRequest<'r> for CreateAuthWrapper {
             Ok(i) => i,
             Err(o) => return o,
         };
-        // TODO remove clone, or refactor the order of validations/actions
+
         match (&token.action(), &oid == token.target_orbit()) {
             (_, false) => Outcome::Failure((
                 Status::BadRequest,
@@ -288,12 +289,15 @@ impl<'r> FromRequest<'r> for CreateAuthWrapper {
                         ))
                     }
                 };
+                let (kp, hosts) = (generate_keypair(), Default::default());
                 match create_orbit(
                     *token.target_orbit(),
                     config.database.path.clone(),
                     controllers,
                     &auth_data,
                     AuthTypes::ZCAP,
+                    hosts,
+                    kp,
                 )
                 .await
                 {

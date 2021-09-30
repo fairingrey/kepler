@@ -7,7 +7,7 @@ use crate::{
     zcap::{ZCAPAuthorization, ZCAPTokens},
 };
 use anyhow::{anyhow, Result};
-use ipfs_embed::{generate_keypair, Config, Ipfs, PeerId};
+use ipfs_embed::{generate_keypair, multiaddr::Protocol, Config, Ipfs, Keypair, Multiaddr, PeerId};
 use libipld::{
     cid::{
         multibase::Base,
@@ -26,7 +26,9 @@ use rocket::{
 use cached::proc_macro::cached;
 use serde::{Deserialize, Serialize};
 use ssi::did::DIDURL;
-use std::{collections::HashMap, convert::TryFrom, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap, convert::TryFrom, ops::Deref, path::PathBuf, str::FromStr, sync::Arc,
+};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct OrbitMetadata {
@@ -36,10 +38,36 @@ pub struct OrbitMetadata {
     pub controllers: Vec<DIDURL>,
     pub read_delegators: Vec<DIDURL>,
     pub write_delegators: Vec<DIDURL>,
+    #[serde(default)]
+    pub hosts: HashMap<PID, Vec<Multiaddr>>,
     // TODO placeholder type
     pub revocations: Vec<String>,
     #[serde(default)]
     pub auth: AuthTypes,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Hash, Debug)]
+#[serde(try_from = "&str", into = "String")]
+pub struct PID(pub PeerId);
+
+impl Deref for PID {
+    type Target = PeerId;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for PID {
+    type Error = <PeerId as FromStr>::Err;
+    fn try_from(v: &str) -> Result<Self, Self::Error> {
+        Ok(Self(PeerId::from_str(v)?))
+    }
+}
+
+impl From<PID> for String {
+    fn from(pid: PID) -> Self {
+        pid.to_base58()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -141,6 +169,8 @@ pub async fn create_orbit(
     controllers: Vec<DIDURL>,
     auth: &[u8],
     auth_type: AuthTypes,
+    peers: HashMap<PID, Vec<Multiaddr>>,
+    kp: Keypair,
 ) -> Result<Option<ArcOrbit>> {
     let dir = path.join(oid.to_string_of_base(Base::Base58Btc)?);
 
@@ -158,11 +188,13 @@ pub async fn create_orbit(
         controllers: controllers,
         read_delegators: vec![],
         write_delegators: vec![],
+        hosts: peers,
         revocations: vec![],
         auth: auth_type,
     };
     fs::write(dir.join("metadata"), serde_json::to_vec_pretty(&md)?).await?;
     fs::write(dir.join("access_log"), auth).await?;
+    fs::write(dir.join("kp"), &kp.to_bytes()).await?;
 
     Ok(Some(load_orbit(oid, path).await.map(|o| {
         o.ok_or_else(|| anyhow!("Couldn't find newly created orbit"))
@@ -182,44 +214,45 @@ pub async fn load_orbit(oid: Cid, path: PathBuf) -> Result<Option<ArcOrbit>> {
 // 1min timeout to evict orbits that might have been deleted
 #[cached(size = 100, time = 60, result = true)]
 async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<ArcOrbit> {
-    let cfg = Config::new(&dir.join("block_store"), generate_keypair());
+    let kp = Keypair::from_bytes(&fs::read(dir.join("kp")).await?)?;
+    let cfg = Config::new(&dir.join("block_store"), kp);
 
     let md: OrbitMetadata = serde_json::from_slice(&fs::read(dir.join("metadata")).await?)?;
-    let md2 = md.clone();
 
     let ipfs = Ipfs::<DefaultParams>::new(cfg).await?;
     let task_ipfs = ipfs.clone();
     let controllers = md.controllers.clone();
 
-    // if let Some(addrs) = md.hosts.get(&PID(ipfs.local_peer_id())) {
-    //     for addr in addrs {
-    //         ipfs.listen_on(addr.clone())?.next().await;
-    //     }
-    // }
+    let id = oid.to_string_of_base(Base::Base58Btc)?;
+    let db = sled::open(dir.join(&id).with_extension("ks3db"))?;
 
-    // for (id, addrs) in md.hosts.iter() {
-    //     if id.0 != ipfs.local_peer_id() {
-    //         for addr in addrs {
-    //             ipfs.add_address(&id.0, addr.clone())
-    //         }
-    //     }
-    // }
+    if let Some(addrs) = md.hosts.get(&PID(ipfs.local_peer_id())) {
+        for addr in addrs {
+            ipfs.listen_on(addr.clone())?.next().await;
+        }
+    }
+
+    for (id, addrs) in md.hosts.iter() {
+        if id.0 != ipfs.local_peer_id() {
+            for addr in addrs {
+                ipfs.dial_address(&id.0, addr.clone());
+            }
+        }
+    }
+
     let task = tokio::spawn(async move {
         let mut events = task_ipfs.swarm_events();
         loop {
             match events.next().await {
                 Some(ipfs_embed::Event::Discovered(p)) => {
                     tracing::debug!("dialing peer {}", p);
-                    task_ipfs.dial(&p);
+                    // task_ipfs.dial(&p);
                 }
                 None => return,
                 _ => continue,
             }
         }
     });
-
-    let id = oid.to_string_of_base(Base::Base58Btc)?;
-    let db = sled::open(dir.join(&id).with_extension("ks3db"))?;
 
     let service_store = Store::new(id, ipfs, db)?;
     let service = Service::start(service_store)?;
