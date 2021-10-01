@@ -20,7 +20,7 @@ use rocket::{
     futures::StreamExt,
     http::Status,
     request::{FromRequest, Outcome, Request},
-    tokio::fs,
+    tokio::{fs, task::JoinHandle},
 };
 
 use cached::proc_macro::cached;
@@ -147,19 +147,34 @@ impl AuthMethods {
     }
 }
 
-pub type ArcOrbit = Arc<Orbit>;
+struct AbortOnDrop<T>(JoinHandle<T>);
 
+impl<T> AbortOnDrop<T> {
+    pub fn new(h: JoinHandle<T>) -> Self {
+        Self(h)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> Deref for AbortOnDrop<T> {
+    type Target = JoinHandle<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Clone)]
 pub struct Orbit {
-    task: tokio::task::JoinHandle<()>,
+    task: Arc<AbortOnDrop<()>>,
     pub service: Service,
     metadata: OrbitMetadata,
     policy: AuthMethods,
-}
-
-impl Drop for Orbit {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 
 // Using Option to distinguish when the orbit already exists from a hard error
@@ -171,7 +186,7 @@ pub async fn create_orbit(
     auth_type: AuthTypes,
     peers: HashMap<PID, Vec<Multiaddr>>,
     kp: Keypair,
-) -> Result<Option<ArcOrbit>> {
+) -> Result<Option<Orbit>> {
     let dir = path.join(oid.to_string_of_base(Base::Base58Btc)?);
 
     // fails if DIR exists, this is Create, not Open
@@ -201,7 +216,7 @@ pub async fn create_orbit(
     })??))
 }
 
-pub async fn load_orbit(oid: Cid, path: PathBuf) -> Result<Option<ArcOrbit>> {
+pub async fn load_orbit(oid: Cid, path: PathBuf) -> Result<Option<Orbit>> {
     let dir = path.join(oid.to_string_of_base(Base::Base58Btc)?);
     if !dir.exists() {
         return Ok(None);
@@ -213,7 +228,7 @@ pub async fn load_orbit(oid: Cid, path: PathBuf) -> Result<Option<ArcOrbit>> {
 // 100 orbits => 600 FDs
 // 1min timeout to evict orbits that might have been deleted
 #[cached(size = 100, time = 60, result = true)]
-async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<ArcOrbit> {
+async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<Orbit> {
     let kp = Keypair::from_bytes(&fs::read(dir.join("kp")).await?)?;
     let cfg = Config::new(&dir.join("block_store"), kp);
 
@@ -240,7 +255,7 @@ async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<ArcOrbit> {
         }
     }
 
-    let task = tokio::spawn(async move {
+    let task = Arc::new(AbortOnDrop::new(tokio::spawn(async move {
         let mut events = task_ipfs.swarm_events();
         loop {
             match events.next().await {
@@ -252,12 +267,12 @@ async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<ArcOrbit> {
                 _ => continue,
             }
         }
-    });
+    })));
 
     let service_store = Store::new(id, ipfs, db)?;
     let service = Service::start(service_store)?;
 
-    Ok(Arc::new(Orbit {
+    Ok(Orbit {
         service,
         task,
         policy: match &md.auth {
@@ -265,7 +280,7 @@ async fn load_orbit_(oid: Cid, dir: PathBuf) -> Result<ArcOrbit> {
             AuthTypes::ZCAP => AuthMethods::ZCAP(controllers),
         },
         metadata: md,
-    }))
+    })
 }
 
 pub fn get_params<'a>(matrix_params: &'a str) -> HashMap<&'a str, &'a str> {

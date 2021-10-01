@@ -1,6 +1,6 @@
 use crate::cas::CidWrap;
 use crate::config;
-use crate::orbit::{create_orbit, load_orbit, verify_oid, ArcOrbit, AuthTokens, AuthTypes};
+use crate::orbit::{create_orbit, load_orbit, verify_oid, AuthTokens, AuthTypes, Orbit};
 use crate::zcap::ZCAPTokens;
 use anyhow::Result;
 use ipfs_embed::{generate_keypair, Keypair, Multiaddr, PeerId};
@@ -99,11 +99,11 @@ pub trait AuthorizationPolicy {
     async fn authorize<'a>(&self, auth_token: &'a Self::Token) -> Result<()>;
 }
 
-pub struct PutAuthWrapper(pub ArcOrbit);
-pub struct GetAuthWrapper(pub ArcOrbit);
-pub struct DelAuthWrapper(pub ArcOrbit);
-pub struct CreateAuthWrapper(pub ArcOrbit);
-pub struct ListAuthWrapper(pub ArcOrbit);
+pub struct PutAuthWrapper(pub Orbit);
+pub struct GetAuthWrapper(pub Orbit);
+pub struct DelAuthWrapper(pub Orbit);
+pub struct CreateAuthWrapper(pub Orbit);
+pub struct ListAuthWrapper(pub Orbit);
 
 async fn extract_info<T>(
     req: &Request<'_>,
