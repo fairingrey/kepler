@@ -58,7 +58,7 @@ impl FromStr for TezosAuthorizationString {
                 })
             }
             // TODO there is a lifetime issue which prevents using the nom error here
-            Err(e) => Err(anyhow!("TzAuth Parsing Failed")),
+            Err(_) => Err(anyhow!("TzAuth Parsing Failed")),
         }
     }
 }
@@ -197,8 +197,8 @@ impl<'r> FromRequest<'r> for TezosAuthorizationString {
 }
 
 impl AuthorizationToken for TezosAuthorizationString {
-    fn action(&self) -> Action {
-        self.action.clone()
+    fn action(&self) -> &Action {
+        &self.action
     }
     fn target_orbit(&self) -> &Cid {
         &self.orbit
@@ -286,7 +286,7 @@ async fn simple_verify_succeed() {
 async fn round_trip() {
     use didkit::DID_METHODS;
     use ssi::{
-        did::{DIDMethod, Source},
+        did::Source,
         jwk::{Algorithm, Params, JWK},
     };
 

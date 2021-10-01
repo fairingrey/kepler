@@ -7,7 +7,7 @@ use crate::{
     zcap::ZCAPTokens,
 };
 use anyhow::{anyhow, Result};
-use ipfs_embed::{Config, Ipfs, Keypair, Multiaddr, PeerId};
+use ipfs_embed::{multiaddr::multiaddr, Config, Ipfs, Keypair, Multiaddr, PeerId};
 use libipld::{
     cid::{
         multibase::Base,
@@ -27,11 +27,7 @@ use cached::proc_macro::cached;
 use serde::{Deserialize, Serialize};
 use ssi::did::DIDURL;
 use std::{
-    collections::HashMap as Map,
-    convert::TryFrom,
-    hash::{Hash, Hasher},
-    ops::Deref,
-    path::PathBuf,
+    collections::HashMap as Map, convert::TryFrom, hash::Hash, ops::Deref, path::PathBuf,
     str::FromStr,
 };
 
@@ -98,7 +94,7 @@ impl<'r> FromRequest<'r> for AuthTokens {
 }
 
 impl AuthorizationToken for AuthTokens {
-    fn action(&self) -> Action {
+    fn action(&self) -> &Action {
         match self {
             Self::Tezos(token) => token.action(),
             Self::ZCAP(token) => token.action(),
@@ -117,7 +113,6 @@ impl AuthorizationPolicy<AuthTokens> for Orbit {
         match auth_token {
             AuthTokens::Tezos(token) => self.metadata.authorize(token).await,
             AuthTokens::ZCAP(token) => self.metadata.authorize(token).await,
-            _ => return Err(anyhow!("Bad token")),
         }
     }
 }
@@ -137,6 +132,7 @@ pub async fn create_orbit(
     uri: &str,
     key_pair: &Keypair,
     tzkt_api: &str,
+    relay: (PeerId, Multiaddr),
 ) -> Result<Option<Orbit>> {
     let dir = path.join(oid.to_string_of_base(Base::Base58Btc)?);
 
@@ -154,7 +150,7 @@ pub async fn create_orbit(
         "tz" => params_to_tz_orbit(oid, &params, tzkt_api).await?,
         _ => OrbitMetadata {
             id: oid.clone(),
-            controllers: controllers,
+            controllers,
             read_delegators: vec![],
             write_delegators: vec![],
             revocations: vec![],
@@ -164,66 +160,34 @@ pub async fn create_orbit(
 
     fs::write(dir.join("metadata"), serde_json::to_vec_pretty(&md)?).await?;
     fs::write(dir.join("access_log"), auth).await?;
+    fs::write(dir.join("kp"), key_pair.to_bytes()).await?;
 
-    Ok(Some(load_orbit(oid, path, key_pair).await.map(|o| {
+    Ok(Some(load_orbit(oid, path, relay).await.map(|o| {
         o.ok_or_else(|| anyhow!("Couldn't find newly created orbit"))
     })??))
 }
 
-pub async fn load_orbit(oid: Cid, path: PathBuf, key_pair: &Keypair) -> Result<Option<Orbit>> {
+pub async fn load_orbit(
+    oid: Cid,
+    path: PathBuf,
+    relay: (PeerId, Multiaddr),
+) -> Result<Option<Orbit>> {
     let dir = path.join(oid.to_string_of_base(Base::Base58Btc)?);
     if !dir.exists() {
         return Ok(None);
     }
-    load_orbit_(oid, dir, key_pair.into())
-        .await
-        .map(|o| Some(o))
-}
-
-struct KP(pub Keypair);
-
-impl From<&Keypair> for KP {
-    fn from(kp: &Keypair) -> Self {
-        KP(Keypair::from_bytes(&kp.to_bytes()).unwrap())
-    }
-}
-
-impl Clone for KP {
-    fn clone(&self) -> Self {
-        KP(Keypair::from_bytes(&self.0.to_bytes()).unwrap())
-    }
-}
-
-impl PartialEq for KP {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.to_bytes() == other.0.to_bytes()
-    }
-}
-
-impl Eq for KP {}
-
-impl Hash for KP {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.to_bytes().hash(state);
-    }
+    load_orbit_(oid, dir, relay).await.map(|o| Some(o))
 }
 
 // Not using this function directly because cached cannot handle Result<Option<>> well.
 // 100 orbits => 600 FDs
 // 1min timeout to evict orbits that might have been deleted
 #[cached(size = 100, time = 60, result = true)]
-async fn load_orbit_(oid: Cid, dir: PathBuf, key_pair: KP) -> Result<Orbit> {
-    let cfg = Config::new(&dir.join("block_store"), key_pair.0);
-
+async fn load_orbit_(_oid: Cid, dir: PathBuf, relay: (PeerId, Multiaddr)) -> Result<Orbit> {
     let md: OrbitMetadata = serde_json::from_slice(&fs::read(dir.join("metadata")).await?)?;
+    let kp = Keypair::from_bytes(&fs::read(dir.join("kp")).await?)?;
 
-    let ipfs = Ipfs::<DefaultParams>::new(cfg).await?;
-
-    if let Some(addrs) = md.hosts.get(&PID(ipfs.local_peer_id())) {
-        for addr in addrs {
-            ipfs.listen_on(addr.clone())?.next().await;
-        }
-    }
+    let ipfs = Ipfs::<DefaultParams>::new(Config::new(&dir.join("block_store"), kp)).await?;
 
     for (id, addrs) in md.hosts.iter() {
         if id.0 != ipfs.local_peer_id() {
@@ -232,6 +196,11 @@ async fn load_orbit_(oid: Cid, dir: PathBuf, key_pair: KP) -> Result<Orbit> {
             }
         }
     }
+
+    // listen for any relayed messages
+    ipfs.listen_on(multiaddr!(P2pCircuit))?.next().await;
+    // establish a connection to the relay
+    ipfs.dial_address(&relay.0, relay.1);
 
     Ok(Orbit { ipfs, metadata: md })
 }
