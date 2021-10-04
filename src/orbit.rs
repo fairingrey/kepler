@@ -2,6 +2,7 @@ use crate::{
     auth::{cid_serde, Action, AuthorizationPolicy, AuthorizationToken},
     cas::ContentAddressedStorage,
     codec::SupportedCodecs,
+    s3::{Service, Store},
     tz::TezosAuthorizationString,
     tz_orbit::params_to_tz_orbit,
     zcap::ZCAPTokens,
@@ -20,7 +21,7 @@ use rocket::{
     futures::StreamExt,
     http::Status,
     request::{FromRequest, Outcome, Request},
-    tokio::fs,
+    tokio::{fs, task::JoinHandle},
 };
 
 use cached::proc_macro::cached;
@@ -28,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use ssi::did::DIDURL;
 use std::{
     collections::HashMap as Map, convert::TryFrom, hash::Hash, ops::Deref, path::PathBuf,
-    str::FromStr,
+    str::FromStr, sync::Arc,
 };
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -117,9 +118,32 @@ impl AuthorizationPolicy<AuthTokens> for Orbit {
     }
 }
 
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> AbortOnDrop<T> {
+    pub fn new(h: JoinHandle<T>) -> Self {
+        Self(h)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> Deref for AbortOnDrop<T> {
+    type Target = JoinHandle<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Clone)]
 pub struct Orbit {
-    ipfs: Ipfs<DefaultParams>,
+    task: Arc<AbortOnDrop<()>>,
+    pub service: Service,
     metadata: OrbitMetadata,
 }
 
@@ -133,6 +157,7 @@ pub async fn create_orbit(
     key_pair: &Keypair,
     tzkt_api: &str,
     relay: (PeerId, Multiaddr),
+    peers: Map<PID, Vec<Multiaddr>>,
 ) -> Result<Option<Orbit>> {
     let dir = path.join(oid.to_string_of_base(Base::Base58Btc)?);
 
@@ -154,7 +179,7 @@ pub async fn create_orbit(
             read_delegators: vec![],
             write_delegators: vec![],
             revocations: vec![],
-            hosts: Map::default(),
+            hosts: peers,
         },
     };
 
@@ -176,33 +201,57 @@ pub async fn load_orbit(
     if !dir.exists() {
         return Ok(None);
     }
-    load_orbit_(oid, dir, relay).await.map(|o| Some(o))
+    load_orbit_(dir, relay).await.map(|o| Some(o))
 }
 
 // Not using this function directly because cached cannot handle Result<Option<>> well.
 // 100 orbits => 600 FDs
 // 1min timeout to evict orbits that might have been deleted
 #[cached(size = 100, time = 60, result = true)]
-async fn load_orbit_(_oid: Cid, dir: PathBuf, relay: (PeerId, Multiaddr)) -> Result<Orbit> {
+async fn load_orbit_(dir: PathBuf, relay: (PeerId, Multiaddr)) -> Result<Orbit> {
     let md: OrbitMetadata = serde_json::from_slice(&fs::read(dir.join("metadata")).await?)?;
+    let id = md.id.to_string_of_base(Base::Base58Btc)?;
     let kp = Keypair::from_bytes(&fs::read(dir.join("kp")).await?)?;
+    let db = sled::open(dir.join("s3index").with_extension("db"))?;
 
     let ipfs = Ipfs::<DefaultParams>::new(Config::new(&dir.join("block_store"), kp)).await?;
-
-    for (id, addrs) in md.hosts.iter() {
-        if id.0 != ipfs.local_peer_id() {
-            for addr in addrs {
-                ipfs.add_address(&id.0, addr.clone())
-            }
-        }
-    }
 
     // listen for any relayed messages
     ipfs.listen_on(multiaddr!(P2pCircuit))?.next().await;
     // establish a connection to the relay
     ipfs.dial_address(&relay.0, relay.1);
 
-    Ok(Orbit { ipfs, metadata: md })
+    for (id, addrs) in md.hosts.iter() {
+        if id.0 != ipfs.local_peer_id() {
+            for addr in addrs {
+                ipfs.dial_address(&id.0, addr.clone());
+            }
+        }
+    }
+
+    let task_ipfs = ipfs.clone();
+    let task = Arc::new(AbortOnDrop::new(tokio::spawn(async move {
+        let mut events = task_ipfs.swarm_events();
+        loop {
+            match events.next().await {
+                Some(ipfs_embed::Event::Discovered(p)) => {
+                    tracing::debug!("dialing peer {}", p);
+                    // task_ipfs.dial(&p);
+                }
+                None => return,
+                _ => continue,
+            }
+        }
+    })));
+
+    let service_store = Store::new(id, ipfs, db)?;
+    let service = Service::start(service_store)?;
+
+    Ok(Orbit {
+        service,
+        task,
+        metadata: md,
+    })
 }
 
 pub fn get_params<'a>(matrix_params: &'a str) -> Map<&'a str, &'a str> {
@@ -245,19 +294,19 @@ impl ContentAddressedStorage for Orbit {
         content: &[u8],
         codec: SupportedCodecs,
     ) -> Result<Cid, <Self as ContentAddressedStorage>::Error> {
-        self.ipfs.put(content, codec).await
+        self.service.ipfs.put(content, codec).await
     }
     async fn get(
         &self,
         address: &Cid,
     ) -> Result<Option<Vec<u8>>, <Self as ContentAddressedStorage>::Error> {
-        ContentAddressedStorage::get(&self.ipfs, address).await
+        ContentAddressedStorage::get(&self.service.ipfs, address).await
     }
     async fn delete(&self, address: &Cid) -> Result<(), <Self as ContentAddressedStorage>::Error> {
-        self.ipfs.delete(address).await
+        self.service.ipfs.delete(address).await
     }
     async fn list(&self) -> Result<Vec<Cid>, <Self as ContentAddressedStorage>::Error> {
-        self.ipfs.list().await
+        self.service.ipfs.list().await
     }
 }
 

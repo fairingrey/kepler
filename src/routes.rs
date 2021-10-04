@@ -1,14 +1,13 @@
 use anyhow::Result;
-use ipfs_embed::{generate_keypair, Keypair, ToLibp2p};
-use libp2p::multiaddr::Protocol;
+use ipfs_embed::{generate_keypair, multiaddr::Protocol, Keypair, PeerId, ToLibp2p};
 use rocket::{
     data::{Data, ToByteUnit},
     form::Form,
     http::Status,
-    serde::{json::Json, Serialize},
+    serde::json::Json,
     State,
 };
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf, sync::RwLock};
 
 use crate::allow_list::OrbitAllowList;
 use crate::auth::{
@@ -17,7 +16,7 @@ use crate::auth::{
 use crate::cas::{CidWrap, ContentAddressedStorage};
 use crate::codec::{PutContent, SupportedCodecs};
 use crate::config;
-use crate::orbit::{create_orbit, load_orbit, verify_oid, Orbit, PID};
+use crate::orbit::{create_orbit, load_orbit, verify_oid, Orbit};
 use crate::relay::RelayNode;
 
 // TODO need to check for every relevant endpoint that the orbit ID in the URL matches the one in the auth token
@@ -204,6 +203,7 @@ pub async fn open_orbit_allowlist(
     params_str: &str,
     config: &State<config::Config>,
     relay: &State<RelayNode>,
+    _keys: &State<RwLock<HashMap<PeerId, Keypair>>>,
 ) -> Result<(), (Status, &'static str)> {
     // no auth token, use allowlist
     match (
@@ -211,17 +211,19 @@ pub async fn open_orbit_allowlist(
         config.orbits.allowlist.as_ref(),
     ) {
         (_, None) => Err((Status::InternalServerError, "Allowlist Not Configured")),
-        (Ok(_), Some(list)) => match list.is_allowed(&orbit_id.0).await {
+        (Ok((_, _params)), Some(list)) => match list.is_allowed(&orbit_id.0).await {
             Ok(controllers) => {
+                let (kp, hosts) = (generate_keypair(), Default::default());
                 create_orbit(
                     orbit_id.0,
                     config.database.path.clone(),
                     controllers,
                     &[],
                     params_str,
-                    &generate_keypair(),
+                    &kp,
                     &config.tzkt.api,
                     (relay.id, relay.internal()),
+                    hosts,
                 )
                 .await
                 .map_err(|_| (Status::InternalServerError, "Failed to create Orbit"))?;
@@ -238,18 +240,6 @@ pub async fn cors(_s: PathBuf) -> () {
     ()
 }
 
-#[derive(Serialize)]
-pub struct HostInfo {
-    pub id: PID,
-}
-
-#[get("/host")]
-pub async fn get_host_info(kp: &State<Keypair>) -> Result<Json<HostInfo>, (Status, &'static str)> {
-    Ok(Json(HostInfo {
-        id: PID(kp.to_peer_id()),
-    }))
-}
-
 #[get("/relay")]
 pub fn relay_addr(relay: &State<RelayNode>) -> String {
     relay
@@ -257,4 +247,16 @@ pub fn relay_addr(relay: &State<RelayNode>) -> String {
         .with(Protocol::P2p(relay.id.into()))
         .with(Protocol::P2pCircuit)
         .to_string()
+}
+
+#[get("/key", rank = 1)]
+pub fn open_host_key(
+    s: &State<RwLock<HashMap<PeerId, Keypair>>>,
+) -> Result<String, (Status, &'static str)> {
+    let keypair = generate_keypair();
+    let id = keypair.to_peer_id();
+    s.write()
+        .map_err(|_| (Status::InternalServerError, "cant read keys"))?
+        .insert(id, keypair);
+    Ok(id.to_base58())
 }

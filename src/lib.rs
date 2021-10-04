@@ -6,7 +6,9 @@ extern crate anyhow;
 extern crate tokio;
 
 use anyhow::Result;
+use ipfs_embed::{generate_keypair, Keypair, PeerId, ToLibp2p};
 use rocket::{fairing::AdHoc, figment::Figment, http::Header, tokio::fs, Build, Rocket};
+use std::{collections::HashMap, sync::RwLock};
 
 pub mod allow_list;
 pub mod auth;
@@ -18,15 +20,15 @@ pub mod orbit;
 pub mod relay;
 pub mod routes;
 pub mod s3;
+pub mod s3_routes;
 pub mod tz;
 pub mod tz_orbit;
 pub mod zcap;
 
-use ipfs_embed::{generate_keypair, Keypair, ToLibp2p};
 use relay::RelayNode;
 use routes::{
-    batch_put_content, cors, delete_content, get_content, get_content_no_auth, get_host_info,
-    list_content, list_content_no_auth, open_orbit_allowlist, open_orbit_authz, put_content,
+    batch_put_content, cors, delete_content, get_content, get_content_no_auth, list_content,
+    list_content_no_auth, open_host_key, open_orbit_allowlist, open_orbit_authz, put_content,
     relay_addr,
 };
 
@@ -59,14 +61,16 @@ pub async fn app(config: &Figment) -> Result<Rocket<Build>> {
     let relay_node = RelayNode::new(kepler_config.relay.port, kp.to_keypair())?;
 
     let mut routes = routes![
+        open_host_key,
         put_content,
         batch_put_content,
         delete_content,
         open_orbit_allowlist,
         open_orbit_authz,
         cors,
-        get_host_info,
-        relay_addr
+        relay_addr,
+        s3_routes::get,
+        s3_routes::put
     ];
 
     if kepler_config.orbits.public {
@@ -91,7 +95,8 @@ pub async fn app(config: &Figment) -> Result<Rocket<Build>> {
                 resp.set_header(Header::new("Access-Control-Allow-Credentials", "true"));
             })
         }))
-        .manage(relay_node))
+        .manage(relay_node)
+        .manage(RwLock::new(HashMap::<PeerId, Keypair>::default())))
 }
 
 #[test]

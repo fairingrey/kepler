@@ -229,7 +229,7 @@ impl<'r> FromRequest<'r> for CreateAuthWrapper {
             Ok(i) => i,
             Err(o) => return o,
         };
-        // TODO remove clone, or refactor the order of validations/actions
+
         match (&token.action(), &oid == token.target_orbit()) {
             (_, false) => Outcome::Failure((
                 Status::BadRequest,
@@ -307,15 +307,17 @@ impl<'r> FromRequest<'r> for CreateAuthWrapper {
                         vec![vm]
                     }
                 };
+                let (kp, hosts) = (generate_keypair(), Default::default());
                 match create_orbit(
                     *token.target_orbit(),
                     config.database.path.clone(),
                     controllers,
                     &auth_data,
                     &parameters,
-                    &generate_keypair(),
+                    &kp,
                     &config.tzkt.api,
                     relay,
+                    hosts,
                 )
                 .await
                 {
