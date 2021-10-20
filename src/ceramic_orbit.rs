@@ -62,8 +62,6 @@ pub async fn get_orbit_state(ceramic_api: &str, stream_id: &str, id: Cid) -> Res
             .map(|did| didkey_to_did_vm(did))
             .collect(),
         hosts: state.content.hosts,
-        read_delegators: vec![],
-        write_delegators: vec![],
         revocations: vec![],
     })
 }

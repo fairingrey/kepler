@@ -40,8 +40,6 @@ pub struct OrbitMetadata {
     #[serde_as(as = "DisplayFromStr")]
     pub id: Cid,
     pub controllers: Vec<DIDURL>,
-    pub read_delegators: Vec<DIDURL>,
-    pub write_delegators: Vec<DIDURL>,
     #[serde(default)]
     #[serde_as(as = "Map<DisplayFromStr, _>")]
     pub hosts: Map<PeerId, Vec<Multiaddr>>,
@@ -148,8 +146,6 @@ pub async fn create_orbit(
         _ => OrbitMetadata {
             id: oid.clone(),
             controllers: controllers,
-            read_delegators: vec![],
-            write_delegators: vec![],
             revocations: vec![],
             hosts: params
                 .get("hosts")
@@ -291,14 +287,6 @@ impl Orbit {
 
     pub fn controllers(&self) -> &[DIDURL] {
         &self.metadata.controllers
-    }
-
-    pub fn read_delegators(&self) -> &[DIDURL] {
-        &self.metadata.read_delegators
-    }
-
-    pub fn write_delegators(&self) -> &[DIDURL] {
-        &self.metadata.write_delegators
     }
 
     pub fn make_uri(&self, cid: &Cid) -> Result<String> {

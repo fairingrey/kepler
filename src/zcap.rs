@@ -109,23 +109,9 @@ impl AuthorizationPolicy<ZCAPTokens> for OrbitMetadata {
                     .and_then(|proof| proof.verification_method.as_ref())
                     .ok_or_else(|| anyhow!("Missing delegation verification method"))
                     .and_then(|s| DIDURL::from_str(&s).map_err(|e| e.into()))?;
-                match auth_token.invocation.property_set.capability_action {
-                    Action::List | Action::Get(_) => {
-                        if !self.read_delegators.contains(&delegator_vm)
-                            && !self.write_delegators.contains(&delegator_vm)
-                            && !self.controllers.contains(&delegator_vm)
+                if !self.controllers.contains(&delegator_vm)
                         {
                             return Err(anyhow!("Delegator not authorized"));
-                        }
-                    }
-                    Action::Put(_) | Action::Del(_) => {
-                        if !self.write_delegators.contains(&delegator_vm)
-                            && !self.controllers.contains(&delegator_vm)
-                        {
-                            return Err(anyhow!("Delegator not write-authorized"));
-                        }
-                    }
-                    _ => return Err(anyhow!("Invalid Action")),
                 };
                 if let Some(ref authorized_invoker) = d.invoker {
                     if authorized_invoker != &URI::String(invoker_vm.to_string()) {
@@ -161,23 +147,9 @@ impl AuthorizationPolicy<ZCAPTokens> for OrbitMetadata {
                 res
             }
             None => {
-                match auth_token.invocation.property_set.capability_action {
-                    Action::List | Action::Get(_) => {
-                        if !self.read_delegators.contains(&invoker_vm)
-                            && !self.write_delegators.contains(&invoker_vm)
-                            && !self.controllers.contains(&invoker_vm)
+                        if !self.controllers.contains(&invoker_vm)
                         {
                             return Err(anyhow!("Invoker not authorized"));
-                        }
-                    }
-                    Action::Put(_) | Action::Del(_) => {
-                        if !self.write_delegators.contains(&invoker_vm)
-                            && !self.controllers.contains(&invoker_vm)
-                        {
-                            return Err(anyhow!("Invoker not authorized"));
-                        }
-                    }
-                    _ => return Err(anyhow!("Invalid Action")),
                 };
                 auth_token
                     .invocation
