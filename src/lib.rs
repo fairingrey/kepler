@@ -14,6 +14,7 @@ pub mod cas;
 pub mod codec;
 pub mod config;
 pub mod ipfs;
+pub mod ipfs_routes;
 pub mod orbit;
 pub mod relay;
 pub mod routes;
@@ -25,11 +26,7 @@ pub mod zcap;
 
 use ipfs_embed::{generate_keypair, Keypair, PeerId, ToLibp2p};
 use relay::RelayNode;
-use routes::{
-    batch_put_content, cors, delete_content, get_content, get_content_no_auth, list_content,
-    list_content_no_auth, open_host_key, open_orbit_allowlist, open_orbit_authz, put_content,
-    relay_addr,
-};
+use routes::{cors, open_host_key, open_orbit_allowlist, open_orbit_authz, relay_addr};
 use std::{collections::HashMap, sync::RwLock};
 
 pub fn tracing_try_init() {
@@ -61,9 +58,9 @@ pub async fn app(config: &Figment) -> Result<Rocket<Build>> {
     let relay_node = RelayNode::new(kepler_config.relay.port, kp.to_keypair())?;
 
     let mut routes = routes![
-        put_content,
-        batch_put_content,
-        delete_content,
+        ipfs_routes::put_content,
+        ipfs_routes::batch_put_content,
+        ipfs_routes::delete_content,
         open_orbit_allowlist,
         open_orbit_authz,
         cors,
@@ -75,16 +72,16 @@ pub async fn app(config: &Figment) -> Result<Rocket<Build>> {
 
     if kepler_config.orbits.public {
         let mut no_auth = routes![
-            get_content_no_auth,
-            list_content_no_auth,
+            ipfs_routes::get_content_no_auth,
+            ipfs_routes::list_content_no_auth,
             s3_routes::get_content_no_auth,
             s3_routes::list_content_no_auth,
         ];
         routes.append(&mut no_auth);
     } else {
         let mut auth = routes![
-            get_content,
-            list_content,
+            ipfs_routes::get_content,
+            ipfs_routes::list_content,
             s3_routes::get_content,
             s3_routes::list_content,
         ];

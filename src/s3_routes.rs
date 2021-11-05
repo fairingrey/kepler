@@ -1,4 +1,5 @@
 use anyhow::Result;
+use libipld::Cid;
 use rocket::{
     data::{Data, ToByteUnit},
     http::{Header, Status},
@@ -9,12 +10,34 @@ use rocket::{
 };
 
 use crate::auth::{DelAuthWrapper, GetAuthWrapper, ListAuthWrapper, PutAuthWrapper};
-use crate::cas::{CidWrap, ContentAddressedStorage};
+use crate::cas::ContentAddressedStorage;
 use crate::config;
 use crate::orbit::load_orbit;
 use crate::relay::RelayNode;
 use crate::s3::ObjectBuilder;
 use std::{collections::BTreeMap, path::PathBuf};
+
+pub struct S3Api(Cid);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for S3Api {
+    type Error = anyhow::Error;
+    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        if let Some(host) = request.headers().get_one("Host") {
+            let mut domains = host.split(".");
+            match (
+                domains.next().map(|s| s.parse()),
+                domains.next(),
+                domains.next(),
+            ) {
+                (Some(Ok(oid)), Some("s3"), Some(_)) => Outcome::Success(Self(oid)),
+                _ => Outcome::Forward(()),
+            }
+        } else {
+            Outcome::Forward(())
+        }
+    }
+}
 
 pub struct Metadata(pub BTreeMap<String, String>);
 
@@ -54,9 +77,9 @@ impl<'r> Responder<'r, 'static> for S3Response {
     }
 }
 
-#[get("/<orbit_id>/s3", rank = 8)]
+#[get("/", rank = 8)]
 pub async fn list_content_no_auth(
-    orbit_id: CidWrap,
+    orbit_id: S3Api,
     config: &State<config::Config>,
     relay: &State<RelayNode>,
 ) -> Result<Json<Vec<String>>, (Status, String)> {
@@ -85,9 +108,9 @@ pub async fn list_content_no_auth(
     ))
 }
 
-#[get("/<_orbit_id>/s3")]
+#[get("/")]
 pub async fn list_content(
-    _orbit_id: CidWrap,
+    _orbit_id: S3Api,
     orbit: ListAuthWrapper,
 ) -> Result<Json<Vec<String>>, (Status, String)> {
     Ok(Json(
@@ -105,9 +128,9 @@ pub async fn list_content(
     ))
 }
 
-#[head("/<_orbit_id>/s3/<key..>")]
+#[head("/<key..>")]
 pub async fn get_metadata(
-    _orbit_id: CidWrap,
+    _orbit_id: S3Api,
     orbit: GetAuthWrapper,
     key: PathBuf,
 ) -> Result<Option<Metadata>, (Status, String)> {
@@ -122,9 +145,9 @@ pub async fn get_metadata(
     }
 }
 
-#[head("/<orbit_id>/s3/<key..>")]
+#[head("/<key..>")]
 pub async fn get_metadata_no_auth(
-    orbit_id: CidWrap,
+    orbit_id: S3Api,
     key: PathBuf,
     config: &State<config::Config>,
     relay: &State<RelayNode>,
@@ -151,9 +174,9 @@ pub async fn get_metadata_no_auth(
     }
 }
 
-#[get("/<_orbit_id>/s3/<key..>")]
+#[get("/<key..>")]
 pub async fn get_content(
-    _orbit_id: CidWrap,
+    _orbit_id: S3Api,
     orbit: GetAuthWrapper,
     key: PathBuf,
 ) -> Result<Option<S3Response>, (Status, String)> {
@@ -175,9 +198,9 @@ pub async fn get_content(
     }
 }
 
-#[get("/<orbit_id>/s3/<key..>")]
+#[get("/<key..>")]
 pub async fn get_content_no_auth(
-    orbit_id: CidWrap,
+    orbit_id: S3Api,
     key: PathBuf,
     config: &State<config::Config>,
     relay: &State<RelayNode>,
@@ -211,9 +234,9 @@ pub async fn get_content_no_auth(
     }
 }
 
-#[put("/<_orbit_id>/s3/<key..>", data = "<data>")]
+#[put("/<key..>", data = "<data>")]
 pub async fn put_content(
-    _orbit_id: CidWrap,
+    _orbit_id: S3Api,
     orbit: PutAuthWrapper,
     key: PathBuf,
     md: Metadata,
@@ -241,9 +264,9 @@ pub async fn put_content(
     Ok(())
 }
 
-#[delete("/<_orbit_id>/s3/<key..>")]
+#[delete("/<key..>")]
 pub async fn delete_content(
-    _orbit_id: CidWrap,
+    _orbit_id: S3Api,
     orbit: DelAuthWrapper,
     key: PathBuf,
 ) -> Result<(), (Status, &'static str)> {
